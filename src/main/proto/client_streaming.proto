@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package streaming.clientstreaming;
+
+option java_multiple_files = true;
+option java_package = "com.bill.streaming.grpc.clientstreaming";
+option java_outer_classname = "ClientStreamingProto";
+
+import "common.proto";
+
+// Client-streaming：Client 陸續傳送多筆請求，Server 收完（Client 呼叫 onCompleted()）後才彙總回一筆結果。
+// 這是最貼近「接收端」情境的模式：對方系統持續把資料推進來，這裡負責收集/彙整。
+service ClientStreamingGreeter {
+  rpc Upload(stream streaming.common.HelloRequest) returns (streaming.common.UploadSummary) {}
+}

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package streaming.bidistreaming;
+
+option java_multiple_files = true;
+option java_package = "com.bill.streaming.grpc.bidistreaming";
+option java_outer_classname = "BidiStreamingProto";
+
+import "common.proto";
+
+// Bidirectional-streaming：雙方各自獨立、同時持續互推訊息。
+service BidiStreamingGreeter {
+  rpc Chat(stream streaming.common.HelloRequest) returns (stream streaming.common.HelloReply) {}
+}

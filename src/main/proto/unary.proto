@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package streaming.unary;
+
+option java_multiple_files = true;
+option java_package = "com.bill.streaming.grpc.unary";
+option java_outer_classname = "UnaryProto";
+
+import "common.proto";
+
+// Unary：一個請求換一個回應，最基礎的溝通模式，行為上很像一般的 REST API。
+service UnaryGreeter {
+  rpc SayHello(streaming.common.HelloRequest) returns (streaming.common.HelloReply) {}
+}

@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package streaming.common;
+
+option java_multiple_files = true;
+option java_package = "com.bill.streaming.grpc.common";
+option java_outer_classname = "CommonProto";
+
+// 四種 RPC 模式共用的訊息型別，避免每個 service 各自重複定義一樣的欄位。
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+
+message UploadSummary {
+  int32 count = 1;
+  string message = 2;
+}
