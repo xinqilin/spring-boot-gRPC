@@ -22,6 +22,115 @@ gRPC 有 4 種溝通模式，這個專案刻意把每一種都拆成**獨立的 
 | **Client-streaming**（客戶端推播） | `grpc.clientstreaming` | `ClientStreamingGreeter.Upload` | Client 陸續送多筆 request，Server 收完（Client 呼叫 `onCompleted()`）後才彙總、回一筆 response。**這最貼近「接收端」的典型場景**：對方系統持續把資料推進來，這裡負責收集/彙整。 |
 | **Bidirectional-streaming**（雙向） | `grpc.bidistreaming` | `BidiStreamingGreeter.Chat` | 雙方各自獨立、同時持續互推訊息，這裡的實作是收到一筆就馬上回一筆（echo）。 |
 
+## Protobuf（`.proto`）怎麼寫、怎麼設計
+
+### 基本骨架
+
+以 `src/main/proto/common.proto` 為例：
+
+```proto
+syntax = "proto3";                                        // 目前幾乎都用 proto3，語法跟舊的 proto2 不同
+package streaming.common;                                 // protobuf 自己的 namespace，避免不同 .proto 檔的型別互撞
+option java_package = "com.bill.streaming.grpc.common";    // 產生的 Java 程式碼要放在哪個 package
+option java_multiple_files = true;                         // 每個 message 各自產生一個獨立 .java 檔（見下方說明）
+option java_outer_classname = "CommonProto";               // java_multiple_files=true 時，這個名字只用在少數 static 方法上
+```
+
+`java_multiple_files` 建議一律開 `true`：關掉的話，所有 message 都會被包在
+`option java_outer_classname` 那個 outer class 裡面，你得寫 `CommonProto.HelloRequest` 才能用；
+開了之後每個 message 都是自己獨立的 top-level class（`HelloRequest`、`HelloReply` ...），比較符合
+一般 Java 的直覺。
+
+### message：定義資料結構，大致等同一個 DTO / POJO
+
+```proto
+message HelloRequest {
+  string name = 1;
+}
+```
+
+每個欄位的寫法固定是：
+
+```
+<型別> <欄位名稱> = <field number>;
+```
+
+### 欄位後面那個數字（1、2、3...）是什麼？可以不寫嗎？
+
+**不行，這個數字（field number）是必填的**，而且它的意思常被誤會——它**不是欄位的順序編號**，
+而是這個欄位在**二進位 wire format** 裡的唯一身分證號碼。protobuf 序列化時完全不靠欄位名稱，
+只靠這個數字去對應欄位。幾個實際規則：
+
+- 同一個 `message` 裡，數字不能重複，但**不需要從 1 開始連續編號**（不過為了好讀，通常還是照順序給）。
+- **1～15** 用 1 byte 就能編碼 tag，**16～2047** 要用 2 bytes——所以把常用/高頻欄位留給 1～15，
+  低頻或之後才加的欄位可以用比較大的數字。
+- 這個數字一旦上線用過（尤其資料已經序列化存起來、或 API 已經對外發布），**就不能再更改或重複使用**，
+  否則舊資料或舊版 client 讀出來的欄位會對應到錯的意思，是實際會發生的相容性事故。
+- 想拿掉某個欄位時，把那行刪掉、但**保留（不重用）那個數字**，或乾脆用 `reserved` 明確標記，
+  避免以後不小心又用到同一個數字：
+
+  ```proto
+  message HelloRequest {
+    reserved 2, 3;
+    reserved "old_field_name";
+    string name = 1;
+  }
+  ```
+
+- 新增欄位就直接用「目前最大數字 + 1」。舊版 client 讀到自己不認識的欄位號碼會直接忽略、不會壞掉——
+  這就是 protobuf 能做到「向前/向後相容」的關鍵設計，你可以新增欄位而不用同時逼所有 client 升級。
+
+可以把 field number 想成「資料庫欄位的 internal ID」而不是「欄位在螢幕上排第幾個」：**欄位改名字
+完全沒問題**（不影響 wire 相容性，只影響產生出來的 Java method 名稱），但這個 ID 一旦用了就不能亂動。
+
+### 常用的欄位型別
+
+| proto 型別 | 說明 | 對應 Java 型別 |
+|---|---|---|
+| `string` | UTF-8 文字 | `String` |
+| `int32` / `int64` | 一般整數 | `int` / `long` |
+| `sint32` / `sint64` | 對負數做過 zig-zag 編碼，欄位常是負數時比 `int32`/`int64` 省空間 | `int` / `long` |
+| `bool` | 布林 | `boolean` |
+| `double` / `float` | 浮點數 | `double` / `float` |
+| `bytes` | 任意二進位資料 | `ByteString` |
+| `repeated T` | 陣列/List，例如 `repeated string tags = 4;` | `List<T>` |
+
+### message 可以互相 `import`，避免重複定義
+
+這個 repo 把四個 service 共用的 `HelloRequest` / `HelloReply` / `UploadSummary` 抽到
+`common.proto`，其他四個 `.proto` 檔用 `import "common.proto";` 引用，再用完整路徑
+`streaming.common.HelloRequest` 取用（可以直接對照 `src/main/proto/unary.proto` 怎麼寫）。
+好處是四個 service 不用各自重複定義一樣的訊息型別；壞處是要多開一個檔案、多一層 import，
+如果訊息很少共用、專案很小，也可以每個 `.proto` 各自定義自己的訊息就好，不一定要抽共用檔。
+
+### service / rpc：定義四種溝通模式的語法差異
+
+```proto
+service UnaryGreeter {
+  rpc SayHello(HelloRequest) returns (HelloReply) {}                 // Unary
+}
+service ServerStreamingGreeter {
+  rpc Subscribe(HelloRequest) returns (stream HelloReply) {}         // Server-streaming：stream 在「回應」那邊
+}
+service ClientStreamingGreeter {
+  rpc Upload(stream HelloRequest) returns (UploadSummary) {}         // Client-streaming：stream 在「請求」那邊
+}
+service BidiStreamingGreeter {
+  rpc Chat(stream HelloRequest) returns (stream HelloReply) {}       // Bidirectional：兩邊都 stream
+}
+```
+
+四種模式的語法差異就只在 `stream` 關鍵字要不要加、加在請求還是回應，其他完全一樣——這也是為什麼
+`streaming.proto`（如果沒拆開的話）很容易四種擠在一起看起來很像，但語意差很多。
+
+### Naming Convention（風格慣例，非強制但建議照做）
+
+- `message` / `service` 名稱：`PascalCase`，例如 `HelloRequest`、`UnaryGreeter`。
+- 欄位名稱：`lower_snake_case`，例如 `user_id`——protoc 產生 Java 程式碼時會自動轉成
+  `getUserId()` / `setUserId()` 這種 camelCase getter/setter，欄位本身不用手動轉。
+- `rpc` 方法名稱：`PascalCase`，例如 `SayHello`——這是為了跟其他語言（Go、Python...）共用同一份
+  schema 時風格一致，不是照 Java 的方法命名慣例。
+
 ## 專案結構
 
 ```
@@ -46,48 +155,9 @@ src/test/java/com/bill/streaming/grpc/
   bidistreaming/BidiStreamingServiceImplTests.java
 ```
 
-每個 proto 檔都用 `import "common.proto"` 引用共用的訊息型別，避免四個檔案各自重複定義一樣的
-`HelloRequest`/`HelloReply`。每個 `*ServiceImpl` 只要標 `@Service` 就會被 Spring Boot 的 gRPC
-autoconfiguration 自動掃描並註冊（不需要額外的 `@GrpcService` annotation，那是舊版社群
-`grpc-spring-boot-starter` 的用法，Spring Boot 4.1 起 gRPC 支援已內建整併進 Boot 本體）。
-
-## 如何 Build / Run
-
-```bash
-./gradlew build      # 會先跑 protoc 產生 Java stub，再編譯（Spring Boot 4.1 已自動管理 protoc / grpc-java 版本，不用手動設定）
-./gradlew bootRun     # 啟動服務，預設監聽 9090 port（可用 spring.grpc.server.port 覆寫）
-```
-
-啟動成功會看到類似這樣的 log，代表四個 service 各自獨立註冊成功：
-
-```
-Registered gRPC service: streaming.unary.UnaryGreeter
-Registered gRPC service: streaming.serverstreaming.ServerStreamingGreeter
-Registered gRPC service: streaming.clientstreaming.ClientStreamingGreeter
-Registered gRPC service: streaming.bidistreaming.BidiStreamingGreeter
-Registered gRPC service: grpc.reflection.v1.ServerReflection
-Registered gRPC service: grpc.health.v1.Health
-gRPC Server started, listening on address: [/[0:0:0:0:0:0:0:0]:9090], port: 9090
-```
-
-（`grpc.reflection.v1.ServerReflection` 跟 `grpc.health.v1.Health` 是因為加了 `io.grpc:grpc-services`
-依賴才會自動出現，用來讓外部工具可以查詢有哪些服務、以及做健康檢查。）
-
-## 如何跑內建測試
-
-```bash
-./gradlew test
-```
-
-四個 package 各自有自己的測試類別，都用 `@AutoConfigureTestGrpcTransport` 啟動一個 in-process 的
-gRPC server（不佔用真實 port），不需要另外寫一個 client 專案、也不需要手動啟動 server：
-
-- `UnaryServiceImplTests` / `ServerStreamingServiceImplTests`：只需要 blocking stub。
-- `ClientStreamingServiceImplTests` / `BidiStreamingServiceImplTests`：需要 async stub
-  （因為要邊送多筆 request 邊收 response），所以用 `CountDownLatch` 等非同步的 `onCompleted()` 完成。
-
-> 小提醒：`@ImportGrpcClients` 如果改用 `basePackageClasses` 做套件掃描，底層預設只認得 blocking stub，
-> 抓不到 async stub。所以這裡改用 `types = XxxStub.class` 明確指定要建立哪一種 stub bean。
+每個 `*ServiceImpl` 只要標 `@Service` 就會被 Spring Boot 的 gRPC autoconfiguration 自動掃描並註冊
+（不需要額外的 `@GrpcService` annotation，那是舊版社群 `grpc-spring-boot-starter` 的用法，
+Spring Boot 4.1 起 gRPC 支援已內建整併進 Boot 本體）。
 
 ## 用 grpcurl 手動驗證（不用寫 client 程式）
 
@@ -114,12 +184,6 @@ grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check
 
 `grpcurl` 對 client-streaming / bidi-streaming 的支援方式是從 stdin 讀多筆 JSON（用 `-d @` 搭配換行分隔的
 JSON 訊息），操作起來不如 `./gradlew test` 直觀，這兩種模式建議直接看對應的 `*ServiceImplTests` 寫法。
-
-## 已知限制 / 這次順手處理的事
-
-- 專案原本就加了 `spring-boot-starter-data-jpa`，但沒有設定任何 DataSource，會導致 **整個 App 完全無法啟動**
-  （跟 gRPC 沒有關係，是既有狀態）。這裡加了 `runtimeOnly 'com.h2database:h2'` 讓它能用一個
-  in-memory H2 資料庫正常開機，之後你真的要接資料庫時，記得換成正式的 driver/連線設定。
 
 ## 下一步可以自己延伸的方向
 
