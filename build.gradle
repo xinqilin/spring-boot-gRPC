@@ -1,8 +1,8 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '4.1.0'
+    id 'org.springframework.boot' version '4.1.1'
     id 'io.spring.dependency-management' version '1.1.7'
-    id 'com.google.protobuf' version '0.9.6'
+    id 'com.google.protobuf' version '0.10.0'
 }
 
 group = 'com.bill'
@@ -20,15 +20,15 @@ repositories {
 }
 
 dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-grpc-server'
-    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
-    implementation 'io.grpc:grpc-services'
-    runtimeOnly 'com.h2database:h2'
-    testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
     testImplementation 'org.springframework.boot:spring-boot-starter-grpc-server-test'
-    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+protobuf {
+    plugins {
+        grpc {}
+    }
 }
 
 tasks.named('test') {

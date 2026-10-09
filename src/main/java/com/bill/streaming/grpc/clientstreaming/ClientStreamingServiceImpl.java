@@ -1,7 +1,11 @@
 package com.bill.streaming.grpc.clientstreaming;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import com.bill.streaming.grpc.common.HelloRequest;
 import com.bill.streaming.grpc.common.UploadSummary;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,14 +24,25 @@ public class ClientStreamingServiceImpl extends ClientStreamingGreeterGrpc.Clien
   public StreamObserver<HelloRequest> upload(StreamObserver<UploadSummary> responseObserver) {
     return new StreamObserver<>() {
 
-      private int count = 0;
-      private final StringBuilder names = new StringBuilder();
+      private final List<String> names = new ArrayList<>();
+      private boolean failed = false;
 
       @Override
       public void onNext(HelloRequest request) {
-        count++;
-        names.append(request.getName()).append(',');
-        log.info("[Upload] received #{} name={}", count, request.getName());
+        if (failed) {
+          return;
+        }
+        if (request.getName().isBlank()) {
+          failed = true;
+          // 原生 gRPC 寫法：自己呼叫 onError 回傳 Status。
+          // onError 之後這個 call 就結束了，不能再呼叫 onNext / onCompleted，所以用 failed 擋掉後續動作。
+          responseObserver.onError(Status.INVALID_ARGUMENT
+              .withDescription("name must not be blank (message #" + (names.size() + 1) + ")")
+              .asRuntimeException());
+          return;
+        }
+        names.add(request.getName());
+        log.info("[Upload] received #{} name={}", names.size(), request.getName());
       }
 
       @Override
@@ -37,10 +52,13 @@ public class ClientStreamingServiceImpl extends ClientStreamingGreeterGrpc.Clien
 
       @Override
       public void onCompleted() {
-        log.info("[Upload] client finished, total={}", count);
+        if (failed) {
+          return;
+        }
+        log.info("[Upload] client finished, total={}", names.size());
         responseObserver.onNext(UploadSummary.newBuilder()
-            .setCount(count)
-            .setMessage("received " + count + " messages: " + names)
+            .setCount(names.size())
+            .setMessage("received " + names.size() + " messages: " + String.join(",", names))
             .build());
         responseObserver.onCompleted();
       }

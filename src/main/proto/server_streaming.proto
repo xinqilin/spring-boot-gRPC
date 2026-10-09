@@ -12,4 +12,7 @@ import "common.proto";
 // 適合「訂閱通知」「即時報價」這類場景。
 service ServerStreamingGreeter {
   rpc Subscribe(streaming.common.HelloRequest) returns (stream streaming.common.HelloReply) {}
+
+  // 同樣是 server-streaming，但 server 依 client 的消化速度推送（flow control / 背壓）。
+  rpc SubscribeWithFlowControl(streaming.common.HelloRequest) returns (stream streaming.common.HelloReply) {}
 }

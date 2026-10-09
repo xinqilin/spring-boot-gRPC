@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.bill.streaming.grpc.common.HelloRequest;
 import com.bill.streaming.grpc.common.UploadSummary;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,8 +17,7 @@ import org.springframework.grpc.client.ImportGrpcClients;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(properties = "spring.autoconfigure.exclude="
-    + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration")
+@SpringBootTest
 @AutoConfigureTestGrpcTransport
 class ClientStreamingServiceImplTests {
 
@@ -29,12 +29,43 @@ class ClientStreamingServiceImplTests {
   @Autowired
   private ClientStreamingGreeterGrpc.ClientStreamingGreeterStub asyncStub;
 
+  private final CountDownLatch completed = new CountDownLatch(1);
+  private final AtomicReference<UploadSummary> summary = new AtomicReference<>();
+  private final AtomicReference<Throwable> error = new AtomicReference<>();
+
   @Test
   void upload_aggregatesClientStream() throws InterruptedException {
-    CountDownLatch completed = new CountDownLatch(1);
-    AtomicReference<UploadSummary> summary = new AtomicReference<>();
+    StreamObserver<HelloRequest> requestObserver = startUpload();
 
-    StreamObserver<HelloRequest> requestObserver = asyncStub.upload(new StreamObserver<>() {
+    requestObserver.onNext(HelloRequest.newBuilder().setName("A").build());
+    requestObserver.onNext(HelloRequest.newBuilder().setName("B").build());
+    requestObserver.onNext(HelloRequest.newBuilder().setName("C").build());
+    requestObserver.onCompleted();
+
+    assertThat(completed.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(error.get()).isNull();
+    assertThat(summary.get().getCount()).isEqualTo(3);
+    assertThat(summary.get().getMessage()).isEqualTo("received 3 messages: A,B,C");
+  }
+
+  @Test
+  void upload_blankName_returnsInvalidArgument() throws InterruptedException {
+    StreamObserver<HelloRequest> requestObserver = startUpload();
+
+    requestObserver.onNext(HelloRequest.newBuilder().setName("A").build());
+    requestObserver.onNext(HelloRequest.newBuilder().setName(" ").build());
+    requestObserver.onNext(HelloRequest.newBuilder().setName("C").build());
+    requestObserver.onCompleted();
+
+    assertThat(completed.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(summary.get()).isNull();
+    Status status = Status.fromThrowable(error.get());
+    assertThat(status.getCode()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+    assertThat(status.getDescription()).isEqualTo("name must not be blank (message #2)");
+  }
+
+  private StreamObserver<HelloRequest> startUpload() {
+    return asyncStub.upload(new StreamObserver<>() {
       @Override
       public void onNext(UploadSummary value) {
         summary.set(value);
@@ -42,6 +73,7 @@ class ClientStreamingServiceImplTests {
 
       @Override
       public void onError(Throwable t) {
+        error.set(t);
         completed.countDown();
       }
 
@@ -50,13 +82,5 @@ class ClientStreamingServiceImplTests {
         completed.countDown();
       }
     });
-
-    requestObserver.onNext(HelloRequest.newBuilder().setName("A").build());
-    requestObserver.onNext(HelloRequest.newBuilder().setName("B").build());
-    requestObserver.onNext(HelloRequest.newBuilder().setName("C").build());
-    requestObserver.onCompleted();
-
-    assertThat(completed.await(5, TimeUnit.SECONDS)).isTrue();
-    assertThat(summary.get().getCount()).isEqualTo(3);
   }
 }

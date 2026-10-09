@@ -18,6 +18,10 @@ public class UnaryServiceImpl extends UnaryGreeterGrpc.UnaryGreeterImplBase {
   @Override
   public void sayHello(HelloRequest request, StreamObserver<HelloReply> responseObserver) {
     log.info("[SayHello] received name={}", request.getName());
+    if (request.getName().isBlank()) {
+      // 直接丟例外，由 GlobalGrpcExceptionHandler 轉成 INVALID_ARGUMENT 回給 client
+      throw new IllegalArgumentException("name must not be blank");
+    }
     responseObserver.onNext(HelloReply.newBuilder()
         .setMessage("Hello, " + request.getName())
         .build());

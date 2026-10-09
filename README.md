@@ -1,47 +1,142 @@
-# Spring Boot + gRPC Receiver 練習
+# spring-boot-gRPC
 
-這是一個 Spring Boot 4.1 + gRPC 的練習專案，角色定位是 **gRPC Server（接收端）**：
-別人（gRPC Client）呼叫這個服務，這個服務負責接收請求並回應。
+[![Build](https://github.com/xinqilin/spring-boot-gRPC/actions/workflows/build.yml/badge.svg)](https://github.com/xinqilin/spring-boot-gRPC/actions/workflows/build.yml)
+![Java 21](https://img.shields.io/badge/Java-21-blue)
+![Spring Boot 4.1.1](https://img.shields.io/badge/Spring%20Boot-4.1.1-6DB33F)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## gRPC 是什麼、為什麼要學
+English | [繁體中文](README.zh-TW.md)
 
-- gRPC 是 Google 開發的 RPC 框架，底層走 HTTP/2，訊息格式用 **Protocol Buffers（protobuf）** 序列化，
-  比傳統 REST + JSON 更省頻寬、更快，且有明確的 schema（`.proto` 檔）可以跨語言產生 client/server 程式碼。
-- 你在 `.proto` 檔定義「服務有哪些方法、輸入輸出長什麼樣子」，工具（`protoc` + gRPC plugin）會自動幫你產生
-  Java 的介面與資料類別，你只需要「實作介面」，不用自己手刻序列化/反序列化、也不用手刻 HTTP handler。
+A hands-on **gRPC server** built with Spring Boot 4.1 and its built-in Spring gRPC support. It covers all four RPC modes, then the parts a real service needs: error handling, interceptors and metadata, deadlines and cancellation, and flow control. Every behavior described here is pinned down by a test.
 
-## 四種 RPC 溝通模式
+New to gRPC? Start with the illustrated introduction (Traditional Chinese): [`docs/grpc-introduction.html`](docs/grpc-introduction.html).
 
-gRPC 有 4 種溝通模式，這個專案刻意把每一種都拆成**獨立的 proto service + 獨立的 package**，
-一個資料夾就是一個完整、可以獨立閱讀的範例，不會四種擠在同一個 service/類別裡混在一起：
+## What's inside
 
-| 模式 | Package | proto service / 方法 | 說明 |
-|---|---|---|---|
-| **Unary**（一問一答） | `grpc.unary` | `UnaryGreeter.SayHello` | 最基本的型態：一個 request 換一個 response，行為上很像一般的 REST API。 |
-| **Server-streaming**（伺服器推播） | `grpc.serverstreaming` | `ServerStreamingGreeter.Subscribe` | Client 送一個 request，Server 陸續推送多筆 response，最後才 `onCompleted()`。適合「訂閱通知」「即時報價」這類場景。 |
-| **Client-streaming**（客戶端推播） | `grpc.clientstreaming` | `ClientStreamingGreeter.Upload` | Client 陸續送多筆 request，Server 收完（Client 呼叫 `onCompleted()`）後才彙總、回一筆 response。**這最貼近「接收端」的典型場景**：對方系統持續把資料推進來，這裡負責收集/彙整。 |
-| **Bidirectional-streaming**（雙向） | `grpc.bidistreaming` | `BidiStreamingGreeter.Chat` | 雙方各自獨立、同時持續互推訊息，這裡的實作是收到一筆就馬上回一筆（echo）。 |
+| Topic | Code | Proven by |
+|---|---|---|
+| Four RPC modes | `grpc/unary`, `grpc/serverstreaming`, `grpc/clientstreaming`, `grpc/bidistreaming` | `*ServiceImplTests` |
+| Error handling: `GrpcExceptionHandler` vs. `onError(Status)` | `grpc/error/GlobalGrpcExceptionHandler`, `ClientStreamingServiceImpl` | `UnaryServiceImplTests`, `ClientStreamingServiceImplTests` |
+| Interceptors, metadata and interceptor ordering | `grpc/interceptor/LoggingServerInterceptor` | `LoggingServerInterceptorTests` |
+| Deadlines and cancellation | `ServerStreamingServiceImpl#subscribe` | `ServerStreamingServiceImplTests` |
+| Flow control (backpressure) | `ServerStreamingServiceImpl#subscribeWithFlowControl` | `ServerStreamingServiceImplTests` |
+| Health and reflection services | auto-configured | `HealthServiceTests` |
+| In-process vs. real Netty server in tests | | `RealServerIntegrationTests` |
 
-## Protobuf（`.proto`）怎麼寫、怎麼設計
+**Stack:** Java 21 · Spring Boot 4.1.1 (Spring gRPC 1.1.1) · grpc-java 1.83.1 · protobuf 4.35.1 · Gradle 9.8.1
 
-### 基本骨架
+## Quick start
 
-以 `src/main/proto/common.proto` 為例：
-
-```proto
-syntax = "proto3";                                        // 目前幾乎都用 proto3，語法跟舊的 proto2 不同
-package streaming.common;                                 // protobuf 自己的 namespace，避免不同 .proto 檔的型別互撞
-option java_package = "com.bill.streaming.grpc.common";    // 產生的 Java 程式碼要放在哪個 package
-option java_multiple_files = true;                         // 每個 message 各自產生一個獨立 .java 檔（見下方說明）
-option java_outer_classname = "CommonProto";               // java_multiple_files=true 時，這個名字只用在少數 static 方法上
+```bash
+./gradlew build      # generate code from .proto, compile, run all tests
+./gradlew bootRun    # start the gRPC server on localhost:9090
+./gradlew test --tests 'com.bill.streaming.grpc.unary.UnaryServiceImplTests'   # a single test class
 ```
 
-`java_multiple_files` 建議一律開 `true`：關掉的話，所有 message 都會被包在
-`option java_outer_classname` 那個 outer class 裡面，你得寫 `CommonProto.HelloRequest` 才能用；
-開了之後每個 message 都是自己獨立的 top-level class（`HelloRequest`、`HelloReply` ...），比較符合
-一般 Java 的直覺。
+Server reflection is enabled, so [grpcurl](https://github.com/fullstorydev/grpcurl) works without the `.proto` files (`brew install grpcurl` on macOS):
 
-### message：定義資料結構，大致等同一個 DTO / POJO
+```bash
+grpcurl -plaintext localhost:9090 list
+grpcurl -plaintext -d '{"name": "Bill"}' localhost:9090 streaming.unary.UnaryGreeter/SayHello
+grpcurl -plaintext -d '{"name": "Bill"}' localhost:9090 streaming.serverstreaming.ServerStreamingGreeter/Subscribe
+grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check
+```
+
+grpcurl reads client-streaming and bidi messages from stdin (`-d @`, one JSON message per line). For those two modes the tests are easier to follow.
+
+## Why gRPC
+
+- gRPC runs on HTTP/2 and serializes messages with **Protocol Buffers**. Payloads are smaller than JSON, and many calls share one connection.
+- You describe the API once in a `.proto` file. `protoc` and the gRPC plugin generate client stubs and server base classes for many languages. You implement an interface instead of hand-writing serialization or HTTP handlers.
+
+## The four RPC modes
+
+Each mode lives in its own `.proto` service and its own Java package, so every folder is a complete example you can read on its own.
+
+| Mode | Package | Service / method | Behavior |
+|---|---|---|---|
+| **Unary** | `grpc.unary` | `UnaryGreeter.SayHello` | One request, one response. Behaves like a REST call. |
+| **Server-streaming** | `grpc.serverstreaming` | `ServerStreamingGreeter.Subscribe` | One request; the server pushes several responses, then `onCompleted()`. Think subscriptions or price feeds. |
+| **Client-streaming** | `grpc.clientstreaming` | `ClientStreamingGreeter.Upload` | The client pushes many requests; the server replies once after the client calls `onCompleted()`. The typical "receiver" scenario: another system streams data in and this service aggregates it. |
+| **Bidirectional** | `grpc.bidistreaming` | `BidiStreamingGreeter.Chat` | Both sides stream independently. This implementation echoes each message as it arrives. |
+
+The only syntactic difference is where the `stream` keyword goes:
+
+```proto
+service UnaryGreeter {
+  rpc SayHello(HelloRequest) returns (HelloReply) {}                 // Unary
+}
+service ServerStreamingGreeter {
+  rpc Subscribe(HelloRequest) returns (stream HelloReply) {}         // stream on the response
+}
+service ClientStreamingGreeter {
+  rpc Upload(stream HelloRequest) returns (UploadSummary) {}         // stream on the request
+}
+service BidiStreamingGreeter {
+  rpc Chat(stream HelloRequest) returns (stream HelloReply) {}       // stream on both
+}
+```
+
+## Beyond hello world
+
+### Error handling
+
+gRPC reports failures as a [status code](https://grpc.io/docs/guides/status-codes/) plus a description. This repo shows two ways to produce one:
+
+- **Spring way (Unary).** `UnaryServiceImpl` throws `IllegalArgumentException` for a blank name. `GlobalGrpcExceptionHandler` implements `GrpcExceptionHandler` and maps it to `INVALID_ARGUMENT`, much like `@ControllerAdvice` in Spring MVC. A handler returns `null` for exceptions it does not handle. Anything nobody handles falls back to `Status.fromThrowable`, which turns an ordinary exception into `UNKNOWN`, so the client cannot tell what went wrong.
+- **Plain gRPC way (Client-streaming).** `ClientStreamingServiceImpl` calls `responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(...).asRuntimeException())` directly. After `onError` the call is over: never call `onNext` or `onCompleted` again, which is why the observer tracks a `failed` flag.
+
+### Interceptors and metadata
+
+`LoggingServerInterceptor` runs before every call, like a servlet filter:
+
+1. reads the `x-request-id` request header (gRPC metadata),
+2. echoes it back in the response headers,
+3. logs method, status code and latency when the call closes.
+
+`@GlobalServerInterceptor` applies it to every service. To target a single service, use `@GrpcService(interceptors = ...)` instead.
+
+**Ordering matters.** Global interceptors are sorted by `@Order`; the first one is the outermost. Spring gRPC's `GrpcExceptionHandlerInterceptor` is annotated `@Order(Ordered.HIGHEST_PRECEDENCE)`, so by default it is the outermost layer. When a service throws, the exception handler closes the call itself, and any interceptor inside it never sees that `close()`: the failure goes unlogged. `LoggingServerInterceptor` therefore uses the same `HIGHEST_PRECEDENCE`. On equal order, application beans are registered before auto-configured ones, so the logging interceptor ends up outside the exception handler. `LoggingServerInterceptorTests` fails if that ever changes, for example when the annotation is removed.
+
+Error responses that carry no message are "trailers-only": the server never calls `sendHeaders`, so the request id is not echoed on errors.
+
+### Deadlines and cancellation
+
+`Subscribe` pushes one reply every 200 ms. A client that sets a 300 ms deadline receives `#1` and `#2`, then gets `DEADLINE_EXCEEDED`. On the server, `ServerCallStreamObserver#isCancelled()` turns true and the loop stops before sending `#3`. `setOnCancelHandler` has to be registered before the first `onNext`.
+
+The `Thread.sleep` is there for the demo only. It blocks the thread handling the call; a production service would schedule the pushes instead.
+
+### Flow control
+
+Calling `onNext` in a loop ignores how fast the client reads. Messages the transport cannot send yet pile up in server memory. `SubscribeWithFlowControl` sends only while `isReady()` is true and continues from `setOnReadyHandler` when the transport has room again.
+
+The test controls the pace from the client side with a `ClientResponseObserver`: `disableAutoRequestWithInitial(1)`, then `request(1)` after each message. In that test the server's ready handler runs 1,001 times, sends one message each time, and all 1,000 messages arrive in order.
+
+### Testing: in-process vs. real server
+
+Most tests use `@SpringBootTest` with `@AutoConfigureTestGrpcTransport`, which swaps in an in-process transport: fast, no ports. Generated stubs are injected with `@ImportGrpcClients`. `RealServerIntegrationTests` deliberately skips that annotation: it starts the real Netty server on a random port (`spring.grpc.server.port=0` plus `@LocalGrpcServerPort`) and connects with a plain `ManagedChannel` over TCP and HTTP/2.
+
+### Health and reflection
+
+Both services come from `io.grpc:grpc-services`, which `spring-boot-starter-grpc-server` already includes. Reflection lets tools such as grpcurl discover services without `.proto` files. Health exposes the standard `grpc.health.v1.Health` service; an empty service name asks for the overall status.
+
+## Writing `.proto` files
+
+### File skeleton
+
+From `src/main/proto/common.proto`:
+
+```proto
+syntax = "proto3";                                        // proto3 is the current syntax
+package streaming.common;                                 // protobuf's own namespace, keeps type names from colliding
+option java_package = "com.bill.streaming.grpc.common";    // Java package of the generated code
+option java_multiple_files = true;                         // one top-level Java class per message
+option java_outer_classname = "CommonProto";               // only used for a few static helpers when java_multiple_files is true
+```
+
+Keep `java_multiple_files = true`. Without it, every message is nested inside the outer class and you write `CommonProto.HelloRequest` instead of `HelloRequest`.
+
+### Messages and field numbers
 
 ```proto
 message HelloRequest {
@@ -49,25 +144,12 @@ message HelloRequest {
 }
 ```
 
-每個欄位的寫法固定是：
+Each field is `<type> <name> = <field number>;`. The number is **required**, and it is not a display order. It is the field's identity on the wire: protobuf never sends field names, only numbers.
 
-```
-<型別> <欄位名稱> = <field number>;
-```
-
-### 欄位後面那個數字（1、2、3...）是什麼？可以不寫嗎？
-
-**不行，這個數字（field number）是必填的**，而且它的意思常被誤會——它**不是欄位的順序編號**，
-而是這個欄位在**二進位 wire format** 裡的唯一身分證號碼。protobuf 序列化時完全不靠欄位名稱，
-只靠這個數字去對應欄位。幾個實際規則：
-
-- 同一個 `message` 裡，數字不能重複，但**不需要從 1 開始連續編號**（不過為了好讀，通常還是照順序給）。
-- **1～15** 用 1 byte 就能編碼 tag，**16～2047** 要用 2 bytes——所以把常用/高頻欄位留給 1～15，
-  低頻或之後才加的欄位可以用比較大的數字。
-- 這個數字一旦上線用過（尤其資料已經序列化存起來、或 API 已經對外發布），**就不能再更改或重複使用**，
-  否則舊資料或舊版 client 讀出來的欄位會對應到錯的意思，是實際會發生的相容性事故。
-- 想拿掉某個欄位時，把那行刪掉、但**保留（不重用）那個數字**，或乾脆用 `reserved` 明確標記，
-  避免以後不小心又用到同一個數字：
+- Numbers must be unique within a message. They do not have to be consecutive.
+- 1 to 15 encode in one byte, 16 to 2047 in two. Give 1 to 15 to frequent fields.
+- Once a number has been used (serialized data exists or the API is public), **never change or reuse it**. Old data or old clients would map the bytes to the wrong field.
+- To remove a field, delete it and reserve its number and name:
 
   ```proto
   message HelloRequest {
@@ -77,119 +159,65 @@ message HelloRequest {
   }
   ```
 
-- 新增欄位就直接用「目前最大數字 + 1」。舊版 client 讀到自己不認識的欄位號碼會直接忽略、不會壞掉——
-  這就是 protobuf 能做到「向前/向後相容」的關鍵設計，你可以新增欄位而不用同時逼所有 client 升級。
+- To add a field, use the next free number. Old clients skip numbers they do not know, which is what makes protobuf forward and backward compatible.
 
-可以把 field number 想成「資料庫欄位的 internal ID」而不是「欄位在螢幕上排第幾個」：**欄位改名字
-完全沒問題**（不影響 wire 相容性，只影響產生出來的 Java method 名稱），但這個 ID 一旦用了就不能亂動。
+Renaming a field is safe on the wire (it only changes the generated Java method names). Changing its number is not.
 
-### 常用的欄位型別
+### Common types
 
-| proto 型別 | 說明 | 對應 Java 型別 |
+| proto type | Meaning | Java type |
 |---|---|---|
-| `string` | UTF-8 文字 | `String` |
-| `int32` / `int64` | 一般整數 | `int` / `long` |
-| `sint32` / `sint64` | 對負數做過 zig-zag 編碼，欄位常是負數時比 `int32`/`int64` 省空間 | `int` / `long` |
-| `bool` | 布林 | `boolean` |
-| `double` / `float` | 浮點數 | `double` / `float` |
-| `bytes` | 任意二進位資料 | `ByteString` |
-| `repeated T` | 陣列/List，例如 `repeated string tags = 4;` | `List<T>` |
+| `string` | UTF-8 text | `String` |
+| `int32` / `int64` | integers | `int` / `long` |
+| `sint32` / `sint64` | zig-zag encoded, smaller when values are often negative | `int` / `long` |
+| `bool` | boolean | `boolean` |
+| `double` / `float` | floating point | `double` / `float` |
+| `bytes` | arbitrary binary data | `ByteString` |
+| `repeated T` | list, e.g. `repeated string tags = 4;` | `List<T>` |
 
-### message 可以互相 `import`，避免重複定義
+### Sharing messages with `import`
 
-這個 repo 把四個 service 共用的 `HelloRequest` / `HelloReply` / `UploadSummary` 抽到
-`common.proto`，其他四個 `.proto` 檔用 `import "common.proto";` 引用，再用完整路徑
-`streaming.common.HelloRequest` 取用（可以直接對照 `src/main/proto/unary.proto` 怎麼寫）。
-好處是四個 service 不用各自重複定義一樣的訊息型別；壞處是要多開一個檔案、多一層 import，
-如果訊息很少共用、專案很小，也可以每個 `.proto` 各自定義自己的訊息就好，不一定要抽共用檔。
+The four services share `HelloRequest`, `HelloReply` and `UploadSummary` from `common.proto`. The other files `import "common.proto";` and refer to `streaming.common.HelloRequest` (see `src/main/proto/unary.proto`). This avoids duplicate definitions at the cost of one more file. In a small project with little sharing, defining messages per file is also fine.
 
-### service / rpc：定義四種溝通模式的語法差異
+### Naming conventions
 
-```proto
-service UnaryGreeter {
-  rpc SayHello(HelloRequest) returns (HelloReply) {}                 // Unary
-}
-service ServerStreamingGreeter {
-  rpc Subscribe(HelloRequest) returns (stream HelloReply) {}         // Server-streaming：stream 在「回應」那邊
-}
-service ClientStreamingGreeter {
-  rpc Upload(stream HelloRequest) returns (UploadSummary) {}         // Client-streaming：stream 在「請求」那邊
-}
-service BidiStreamingGreeter {
-  rpc Chat(stream HelloRequest) returns (stream HelloReply) {}       // Bidirectional：兩邊都 stream
-}
-```
+- `message` and `service` names: `PascalCase` (`HelloRequest`, `UnaryGreeter`).
+- Field names: `lower_snake_case` (`user_id`). protoc generates `getUserId()` / `setUserId()` for Java.
+- `rpc` names: `PascalCase` (`SayHello`), so the schema reads the same from Go, Python and other languages.
 
-四種模式的語法差異就只在 `stream` 關鍵字要不要加、加在請求還是回應，其他完全一樣——這也是為什麼
-`streaming.proto`（如果沒拆開的話）很容易四種擠在一起看起來很像，但語意差很多。
-
-### Naming Convention（風格慣例，非強制但建議照做）
-
-- `message` / `service` 名稱：`PascalCase`，例如 `HelloRequest`、`UnaryGreeter`。
-- 欄位名稱：`lower_snake_case`，例如 `user_id`——protoc 產生 Java 程式碼時會自動轉成
-  `getUserId()` / `setUserId()` 這種 camelCase getter/setter，欄位本身不用手動轉。
-- `rpc` 方法名稱：`PascalCase`，例如 `SayHello`——這是為了跟其他語言（Go、Python...）共用同一份
-  schema 時風格一致，不是照 Java 的方法命名慣例。
-
-## 專案結構
+## Project layout
 
 ```
 src/main/proto/
-  common.proto            四個 service 共用的訊息型別（HelloRequest / HelloReply / UploadSummary）
-  unary.proto             UnaryGreeter service
-  server_streaming.proto  ServerStreamingGreeter service
-  client_streaming.proto  ClientStreamingGreeter service
-  bidi_streaming.proto    BidiStreamingGreeter service
+  common.proto              shared messages (HelloRequest / HelloReply / UploadSummary)
+  unary.proto               UnaryGreeter
+  server_streaming.proto    ServerStreamingGreeter (Subscribe, SubscribeWithFlowControl)
+  client_streaming.proto    ClientStreamingGreeter
+  bidi_streaming.proto      BidiStreamingGreeter
 
 src/main/java/com/bill/streaming/grpc/
-  common/                 （protoc 產生的共用訊息類別，不用手寫）
-  unary/UnaryServiceImpl.java
-  serverstreaming/ServerStreamingServiceImpl.java
-  clientstreaming/ClientStreamingServiceImpl.java
-  bidistreaming/BidiStreamingServiceImpl.java
+  unary/ serverstreaming/ clientstreaming/ bidistreaming/   one service implementation per mode
+  error/GlobalGrpcExceptionHandler.java                      exception -> gRPC status
+  interceptor/LoggingServerInterceptor.java                  request id, logging, ordering
 
-src/test/java/com/bill/streaming/grpc/
-  unary/UnaryServiceImplTests.java
-  serverstreaming/ServerStreamingServiceImplTests.java
-  clientstreaming/ClientStreamingServiceImplTests.java
-  bidistreaming/BidiStreamingServiceImplTests.java
+src/test/java/com/bill/streaming/grpc/                      one test class per behavior
+
+docs/grpc-introduction.html                                  illustrated introduction (Traditional Chinese)
 ```
 
-每個 `*ServiceImpl` 只要標 `@Service` 就會被 Spring Boot 的 gRPC autoconfiguration 自動掃描並註冊
-（不需要額外的 `@GrpcService` annotation，那是舊版社群 `grpc-spring-boot-starter` 的用法，
-Spring Boot 4.1 起 gRPC 支援已內建整併進 Boot 本體）。
+Generated code goes to `build/generated/sources/proto/main/{java,grpc}`. Each `.proto` sets `java_package` to the package of its implementation, so the generated `*Grpc` classes are used without imports.
 
-## 用 grpcurl 手動驗證（不用寫 client 程式）
+### Build notes
 
-因為專案加了 reflection 支援，不需要 `.proto` 檔，直接用 [grpcurl](https://github.com/fullstorydev/grpcurl) 就能打：
+- Spring Boot's Gradle plugin reacts to the `com.google.protobuf` plugin and configures the `protoc` and `protoc-gen-grpc-java` versions. The `protobuf { plugins { grpc {} } }` block in `build.gradle` is still required; without it only message classes are generated, and the `*Grpc` stubs are missing.
+- A service is exposed as soon as it is a `BindableService` bean; `@Service` is enough. Spring gRPC's `@GrpcService` is optional and mainly useful for per-service interceptors.
 
-```bash
-# macOS 安裝 grpcurl（沒裝的話才需要）
-brew install grpcurl
+## Next steps
 
-# 先 ./gradlew bootRun 啟動服務，再開另一個 terminal：
+- **TLS:** the server runs in plaintext. Configure an SSL bundle with `spring.grpc.server.ssl.bundle`.
+- **A real client project:** call this server from a separate app using `spring-boot-starter-grpc-client` and `@ImportGrpcClients`.
+- **Observability:** add Micrometer metrics and tracing for gRPC calls.
 
-# 列出所有服務
-grpcurl -plaintext localhost:9090 list
+## License
 
-# 呼叫 Unary：SayHello
-grpcurl -plaintext -d '{"name": "Bill"}' localhost:9090 streaming.unary.UnaryGreeter/SayHello
-
-# 呼叫 Server-streaming：Subscribe（會連續印出 5 筆回應）
-grpcurl -plaintext -d '{"name": "Bill"}' localhost:9090 streaming.serverstreaming.ServerStreamingGreeter/Subscribe
-
-# 健康檢查
-grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check
-```
-
-`grpcurl` 對 client-streaming / bidi-streaming 的支援方式是從 stdin 讀多筆 JSON（用 `-d @` 搭配換行分隔的
-JSON 訊息），操作起來不如 `./gradlew test` 直觀，這兩種模式建議直接看對應的 `*ServiceImplTests` 寫法。
-
-## 下一步可以自己延伸的方向
-
-- **TLS**：目前是 plaintext（`-plaintext` 參數），正式環境要開 TLS。
-- **Interceptor**：可以寫 `ServerInterceptor` 做統一的 log、認證、trace context 傳遞。
-- **錯誤處理**：目前範例沒有處理例外，真實情境要用 `Status`/`StatusRuntimeException`
-  回傳明確的 gRPC 錯誤碼（例如 `INVALID_ARGUMENT`、`NOT_FOUND`），而不是讓例外直接變成 `UNKNOWN`。
-- **真的寫一個 client 專案**：目前驗證都是同一個專案內的 test 或 grpcurl，真的要練習「兩個服務對打」
-  可以另外開一個小專案，用 `spring-boot-starter-grpc-client` + `@ImportGrpcClients` 呼叫這個 server。
+[MIT](LICENSE)
