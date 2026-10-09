@@ -9,7 +9,7 @@
 
 用 Spring Boot 4.1 內建的 Spring gRPC 寫的 **gRPC Server（接收端）** 練習專案：別人（gRPC Client）呼叫這個服務，這個服務負責接收請求並回應。除了四種 RPC 模式，也示範真實服務會用到的錯誤處理、interceptor 與 metadata、deadline 與 cancellation、flow control。這份文件提到的每個行為都有對應的測試。
 
-第一次接觸 gRPC？先看圖解入門：[`docs/grpc-introduction.html`](docs/grpc-introduction.html)。
+第一次接觸 gRPC？先看[圖解入門](https://bill-lin.dev/spring-boot-gRPC/grpc-introduction.html)。
 
 ## 專案內容
 

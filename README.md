@@ -9,7 +9,7 @@ English | [繁體中文](README.zh-TW.md)
 
 A hands-on **gRPC server** built with Spring Boot 4.1 and its built-in Spring gRPC support. It covers all four RPC modes, then the parts a real service needs: error handling, interceptors and metadata, deadlines and cancellation, and flow control. Every behavior described here is pinned down by a test.
 
-New to gRPC? Start with the illustrated introduction (Traditional Chinese): [`docs/grpc-introduction.html`](docs/grpc-introduction.html).
+New to gRPC? Start with the [illustrated introduction](https://bill-lin.dev/spring-boot-gRPC/grpc-introduction.html) (Traditional Chinese).
 
 ## What's inside
 
